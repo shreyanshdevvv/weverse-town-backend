@@ -257,7 +257,10 @@ export class RealtimeGateway
     client.join(data.roomId);
     client.data.roomId = data.roomId;
 
-    const spawnX = Math.floor(room.width / 2);
+    const playerCount = room.players.size;
+    // Stagger horizontal spawn positions: 1000, 1044, 956, 1088, 912... so players do not overlap
+    const spread = (playerCount % 2 === 0 ? 1 : -1) * Math.ceil(playerCount / 2) * 44;
+    const spawnX = Math.floor(room.width / 2) + spread;
     const spawnY = 480; // Main Lobby reception area (obstacle-free)
 
     const playerState: PlayerState = {
