@@ -2,6 +2,7 @@ import {
   WebSocketGateway,
   WebSocketServer,
   SubscribeMessage,
+  OnGatewayInit,
   OnGatewayConnection,
   OnGatewayDisconnect,
   ConnectedSocket,
@@ -70,7 +71,7 @@ export interface ScreenSharePayload {
   },
 })
 export class RealtimeGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
 {
   @WebSocketServer()
   server: Server;
@@ -96,27 +97,66 @@ export class RealtimeGateway
     private readonly chatService: ChatService,
   ) {}
 
+  afterInit(server: Server) {
+    server.use(async (socket: any, next) => {
+      try {
+        const token =
+          socket.handshake.auth?.token ||
+          socket.handshake.headers?.authorization?.replace('Bearer ', '');
+
+        if (!token) {
+          return next(new Error('Unauthorized: No token provided'));
+        }
+
+        const payload = await this.jwtService.verifyAsync(token);
+        const user = await this.authService.validateUserById(payload.sub);
+        if (!user) {
+          return next(new Error('Unauthorized: User not found'));
+        }
+
+        socket.data = socket.data || {};
+        socket.data.user = user;
+        next();
+      } catch (err) {
+        next(new Error('Unauthorized: Invalid token'));
+      }
+    });
+  }
+
+  async getOrAuthenticateUser(client: AuthenticatedSocket) {
+    if (client.data?.user) return client.data.user;
+
+    const token =
+      client.handshake.auth?.token ||
+      client.handshake.headers?.authorization?.replace('Bearer ', '');
+
+    if (token) {
+      try {
+        const payload = await this.jwtService.verifyAsync(token);
+        const user = await this.authService.validateUserById(payload.sub);
+        if (user) {
+          client.data = client.data || {};
+          client.data.user = user;
+          this.userSockets.set(user.id, client.id);
+          return user;
+        }
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   async handleConnection(client: AuthenticatedSocket) {
     try {
-      const token =
-        client.handshake.auth?.token ||
-        client.handshake.headers?.authorization?.replace('Bearer ', '');
+      const user = await this.getOrAuthenticateUser(client);
 
-      if (!token) {
-        this.logger.warn(`Connection rejected: No token provided (${client.id})`);
-        client.disconnect(true);
-        return;
-      }
-
-      const payload = await this.jwtService.verifyAsync(token);
-      const user = await this.authService.validateUserById(payload.sub);
       if (!user) {
-        this.logger.warn(`Connection rejected: User not found (${client.id})`);
+        this.logger.warn(`Connection rejected: User not found or invalid token (${client.id})`);
         client.disconnect(true);
         return;
       }
 
-      client.data.user = user;
       this.userSockets.set(user.id, client.id);
       this.logger.log(`Player connected: ${user.displayName} (${client.id})`);
     } catch (error) {
@@ -179,7 +219,11 @@ export class RealtimeGateway
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { roomId: string },
   ) {
-    const user = client.data.user;
+    const user = await this.getOrAuthenticateUser(client);
+
+    if (!user) {
+      return { success: false, error: 'Unauthorized: User session not found on socket' };
+    }
 
     if (!data?.roomId) {
       return { success: false, error: 'roomId is required' };
@@ -214,7 +258,7 @@ export class RealtimeGateway
     client.data.roomId = data.roomId;
 
     const spawnX = Math.floor(room.width / 2);
-    const spawnY = Math.floor(room.height / 2);
+    const spawnY = 480; // Main Lobby reception area (obstacle-free)
 
     const playerState: PlayerState = {
       userId: user.id,
@@ -276,12 +320,16 @@ export class RealtimeGateway
   }
 
   @SubscribeMessage('player:move')
-  handleMove(
+  async handleMove(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: MovePayload,
   ) {
-    const user = client.data.user;
-    const roomId = client.data.roomId;
+    const user = await this.getOrAuthenticateUser(client);
+    const roomId = client.data?.roomId;
+
+    if (!user) {
+      return { success: false, error: 'Unauthorized: User session not found' };
+    }
 
     if (!roomId) {
       return { success: false, error: 'You must join a room first' };
@@ -356,8 +404,12 @@ export class RealtimeGateway
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { avatar: string },
   ) {
-    const user = client.data.user;
-    const roomId = client.data.roomId;
+    const user = await this.getOrAuthenticateUser(client);
+    const roomId = client.data?.roomId;
+
+    if (!user) {
+      return { success: false, error: 'Unauthorized: User session not found' };
+    }
 
     if (!data?.avatar) {
       return { success: false, error: 'avatar is required' };
@@ -388,8 +440,12 @@ export class RealtimeGateway
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: ChatSendPayload,
   ) {
-    const user = client.data.user;
-    const roomId = client.data.roomId;
+    const user = await this.getOrAuthenticateUser(client);
+    const roomId = client.data?.roomId;
+
+    if (!user) {
+      return { success: false, error: 'Unauthorized: User session not found' };
+    }
 
     if (!roomId) {
       return { success: false, error: 'You must join a room before chatting' };
@@ -494,9 +550,10 @@ export class RealtimeGateway
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: ScreenSharePayload,
   ) {
-    const user = client.data.user;
-    const roomId = client.data.roomId;
+    const user = client.data?.user;
+    const roomId = client.data?.roomId;
 
+    if (!user) return { success: false, error: 'Unauthorized: User session not found' };
     if (!roomId) return { success: false, error: 'Not in a room' };
 
     const room = this.rooms.get(roomId);
