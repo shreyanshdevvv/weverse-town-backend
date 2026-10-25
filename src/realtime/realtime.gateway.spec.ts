@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { RealtimeGateway, AuthenticatedSocket } from './realtime.gateway.js';
 import { AuthService } from '../auth/auth.service.js';
 import { RoomsService } from '../rooms/rooms.service.js';
+import { ChatService } from '../chat/chat.service.js';
 
 describe('RealtimeGateway', () => {
   let gateway: RealtimeGateway;
@@ -20,6 +21,10 @@ describe('RealtimeGateway', () => {
     findOne: vi.fn(),
   };
 
+  const mockChatService = {
+    saveMessage: vi.fn(),
+  };
+
   beforeEach(async () => {
     vi.clearAllMocks();
 
@@ -29,6 +34,7 @@ describe('RealtimeGateway', () => {
         { provide: JwtService, useValue: mockJwtService },
         { provide: AuthService, useValue: mockAuthService },
         { provide: RoomsService, useValue: mockRoomsService },
+        { provide: ChatService, useValue: mockChatService },
       ],
     }).compile();
 
@@ -169,7 +175,6 @@ describe('RealtimeGateway', () => {
     });
 
     it('should accept valid move and broadcast player:moved', () => {
-      // Player spawns at (500, 500)
       const result = gateway.handleMove(mockClient, {
         x: 510,
         y: 505,
@@ -189,7 +194,7 @@ describe('RealtimeGateway', () => {
       mockTo.emit.mockClear();
 
       const result = gateway.handleMove(mockClient, {
-        x: 1200, // Room width is 1000!
+        x: 1200,
         y: 500,
       });
 
@@ -201,7 +206,6 @@ describe('RealtimeGateway', () => {
     it('should reject impossible speed / teleportation attempts', () => {
       mockTo.emit.mockClear();
 
-      // Trying to teleport from (500, 500) to (900, 900) in 1ms
       const result = gateway.handleMove(mockClient, {
         x: 900,
         y: 900,
@@ -213,18 +217,49 @@ describe('RealtimeGateway', () => {
     });
   });
 
-  describe('handleDisconnect', () => {
-    it('should clean up player and broadcast player:left', async () => {
-      const mockTo = { emit: vi.fn() };
+  describe('In-Room Chat (chat:send)', () => {
+    it('should save message and broadcast to room', async () => {
+      const mockServerTo = { emit: vi.fn() };
+      (gateway.server.to as any).mockReturnValue(mockServerTo);
+
       const mockClient = {
-        join: vi.fn(),
-        leave: vi.fn(),
-        emit: vi.fn(),
-        to: vi.fn().mockReturnValue(mockTo),
         data: {
           user: { id: 'user-1', displayName: 'Alice' },
+          roomId: 'room-1',
         },
       } as unknown as AuthenticatedSocket;
+
+      mockChatService.saveMessage.mockResolvedValue({
+        id: 'msg-1',
+        roomId: 'room-1',
+        senderId: 'user-1',
+        content: 'Hi everyone!',
+        createdAt: new Date(),
+        sender: { id: 'user-1', displayName: 'Alice' },
+      });
+
+      const result = await gateway.handleChatMessage(mockClient, {
+        content: 'Hi everyone!',
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockChatService.saveMessage).toHaveBeenCalledWith(
+        'room-1',
+        'user-1',
+        'Hi everyone!',
+      );
+      expect(gateway.server.to).toHaveBeenCalledWith('room-1');
+      expect(mockServerTo.emit).toHaveBeenCalledWith(
+        'chat:message',
+        expect.objectContaining({ content: 'Hi everyone!' }),
+      );
+    });
+  });
+
+  describe('Proximity Engine', () => {
+    it('should emit proximity:enter when two players spawn within 150px', async () => {
+      const mockServerTo = { emit: vi.fn() };
+      (gateway.server.to as any).mockReturnValue(mockServerTo);
 
       mockRoomsService.isUserInRoom.mockResolvedValue(true);
       mockRoomsService.findOne.mockResolvedValue({
@@ -233,15 +268,55 @@ describe('RealtimeGateway', () => {
         height: 1000,
       });
 
-      await gateway.handleJoinRoom(mockClient, { roomId: 'room-1' });
+      // Player 1 (Alice)
+      const client1 = {
+        id: 'socket-alice',
+        join: vi.fn(),
+        leave: vi.fn(),
+        emit: vi.fn(),
+        to: vi.fn().mockReturnValue({ emit: vi.fn() }),
+        data: { user: { id: 'alice-id', displayName: 'Alice' } },
+        handshake: { auth: { token: 't1' } },
+      } as unknown as AuthenticatedSocket;
 
-      // Disconnect
-      gateway.handleDisconnect(mockClient);
+      // Player 2 (Bob)
+      const client2 = {
+        id: 'socket-bob',
+        join: vi.fn(),
+        leave: vi.fn(),
+        emit: vi.fn(),
+        to: vi.fn().mockReturnValue({ emit: vi.fn() }),
+        data: { user: { id: 'bob-id', displayName: 'Bob' } },
+        handshake: { auth: { token: 't2' } },
+      } as unknown as AuthenticatedSocket;
 
-      expect(mockClient.to).toHaveBeenCalledWith('room-1');
-      expect(mockTo.emit).toHaveBeenCalledWith('player:left', {
-        userId: 'user-1',
-      });
+      mockJwtService.verifyAsync
+        .mockResolvedValueOnce({ sub: 'alice-id' })
+        .mockResolvedValueOnce({ sub: 'bob-id' });
+
+      mockAuthService.validateUserById
+        .mockResolvedValueOnce({ id: 'alice-id', displayName: 'Alice' })
+        .mockResolvedValueOnce({ id: 'bob-id', displayName: 'Bob' });
+
+      await gateway.handleConnection(client1);
+      await gateway.handleConnection(client2);
+
+      await gateway.handleJoinRoom(client1, { roomId: 'room-1' });
+      await gateway.handleJoinRoom(client2, { roomId: 'room-1' });
+
+      // Both spawned at (500, 500) -> distance is 0px <= 150px!
+      // client2 should receive proximity:enter with Alice
+      expect(client2.emit).toHaveBeenCalledWith(
+        'proximity:enter',
+        expect.objectContaining({ peerId: 'alice-id', displayName: 'Alice' }),
+      );
+
+      // Server should target Alice's socket with Bob
+      expect(gateway.server.to).toHaveBeenCalledWith('socket-alice');
+      expect(mockServerTo.emit).toHaveBeenCalledWith(
+        'proximity:enter',
+        expect.objectContaining({ peerId: 'bob-id', displayName: 'Bob' }),
+      );
     });
   });
 });

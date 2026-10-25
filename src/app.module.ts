@@ -7,6 +7,7 @@ import { validateEnv } from './config/env.validation.js';
 import { AuthModule } from './auth/auth.module.js';
 import { RoomsModule } from './rooms/rooms.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
+import { ChatModule } from './chat/chat.module.js';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { RealtimeModule } from './realtime/realtime.module.js';
     AuthModule,
     RoomsModule,
     RealtimeModule,
+    ChatModule,
   ],
   controllers: [AppController],
   providers: [AppService],
