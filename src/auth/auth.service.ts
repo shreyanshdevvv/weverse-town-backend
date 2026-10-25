@@ -32,6 +32,7 @@ export class AuthService {
       data: {
         email: dto.email.toLowerCase(),
         displayName: dto.displayName,
+        avatar: dto.avatar || 'avatar-1',
         passwordHash,
       },
     });
@@ -44,6 +45,7 @@ export class AuthService {
         id: user.id,
         email: user.email,
         displayName: user.displayName,
+        avatar: user.avatar,
         createdAt: user.createdAt,
       },
     };
@@ -75,6 +77,7 @@ export class AuthService {
         id: user.id,
         email: user.email,
         displayName: user.displayName,
+        avatar: user.avatar,
         createdAt: user.createdAt,
       },
     };
@@ -87,6 +90,21 @@ export class AuthService {
         id: true,
         email: true,
         displayName: true,
+        avatar: true,
+        createdAt: true,
+      },
+    });
+  }
+
+  async updateAvatar(userId: string, avatar: string) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { avatar },
+      select: {
+        id: true,
+        email: true,
+        displayName: true,
+        avatar: true,
         createdAt: true,
       },
     });

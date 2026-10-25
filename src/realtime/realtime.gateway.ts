@@ -17,6 +17,7 @@ import { ChatService } from '../chat/chat.service.js';
 export interface PlayerState {
   userId: string;
   displayName: string;
+  avatar: string;
   x: number;
   y: number;
   direction: 'up' | 'down' | 'left' | 'right';
@@ -37,6 +38,7 @@ export interface AuthenticatedSocket extends Socket {
       id: string;
       email: string;
       displayName: string;
+      avatar: string;
     };
     roomId?: string;
   };
@@ -217,6 +219,7 @@ export class RealtimeGateway
     const playerState: PlayerState = {
       userId: user.id,
       displayName: user.displayName,
+      avatar: user.avatar || 'avatar-1',
       x: spawnX,
       y: spawnY,
       direction: 'down',
@@ -232,6 +235,7 @@ export class RealtimeGateway
     const serializedPlayers = Array.from(room.players.values()).map((p) => ({
       userId: p.userId,
       displayName: p.displayName,
+      avatar: p.avatar,
       x: p.x,
       y: p.y,
       direction: p.direction,
@@ -249,6 +253,7 @@ export class RealtimeGateway
     client.to(data.roomId).emit('player:joined', {
       userId: playerState.userId,
       displayName: playerState.displayName,
+      avatar: playerState.avatar,
       x: playerState.x,
       y: playerState.y,
       direction: playerState.direction,
@@ -262,6 +267,7 @@ export class RealtimeGateway
       player: {
         userId: playerState.userId,
         displayName: playerState.displayName,
+        avatar: playerState.avatar,
         x: playerState.x,
         y: playerState.y,
         direction: playerState.direction,
@@ -343,6 +349,38 @@ export class RealtimeGateway
     client.to(roomId).emit('player:moved', moveEvent);
 
     return { success: true, ...moveEvent };
+  }
+
+  @SubscribeMessage('player:update-avatar')
+  async handleUpdateAvatar(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { avatar: string },
+  ) {
+    const user = client.data.user;
+    const roomId = client.data.roomId;
+
+    if (!data?.avatar) {
+      return { success: false, error: 'avatar is required' };
+    }
+
+    const updated = await this.authService.updateAvatar(user.id, data.avatar);
+    user.avatar = updated.avatar;
+
+    if (roomId) {
+      const room = this.rooms.get(roomId);
+      if (room) {
+        const player = room.players.get(user.id);
+        if (player) {
+          player.avatar = updated.avatar;
+        }
+      }
+      this.server.to(roomId).emit('player:avatar-updated', {
+        userId: user.id,
+        avatar: updated.avatar,
+      });
+    }
+
+    return { success: true, avatar: updated.avatar };
   }
 
   @SubscribeMessage('chat:send')

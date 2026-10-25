@@ -45,7 +45,8 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
   {
     "email": "alice@metaverse.com",
     "password": "password123",
-    "displayName": "Alice"
+    "displayName": "Alice",
+    "avatar": "avatar-1"
   }
   ```
 - **Response (`201 Created`)**:
@@ -56,6 +57,7 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
       "id": "e5b6c2d1-4f3a-4b1a-8e2c-3d4f5a6b7c8d",
       "email": "alice@metaverse.com",
       "displayName": "Alice",
+      "avatar": "avatar-1",
       "createdAt": "2026-10-25T..."
     }
   }
@@ -75,7 +77,18 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
 #### 3. Get Current Profile
 - **Endpoint**: `GET /auth/me`
 - **Headers**: `Authorization: Bearer <accessToken>`
-- **Response (`200 OK`)**: User object.
+- **Response (`200 OK`)**: User object (including `avatar`).
+
+#### 4. Update Avatar
+- **Endpoint**: `PATCH /auth/avatar`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Body**:
+  ```json
+  {
+    "avatar": "avatar-2"
+  }
+  ```
+- **Response (`200 OK`)**: Updated User object.
 
 ---
 
@@ -191,6 +204,7 @@ const socket = io('http://localhost:3000', {
     "player": {
       "userId": "user-uuid",
       "displayName": "Alice",
+      "avatar": "avatar-1",
       "x": 500,
       "y": 500,
       "direction": "down"
@@ -207,6 +221,7 @@ const socket = io('http://localhost:3000', {
       {
         "userId": "bob-uuid",
         "displayName": "Bob",
+        "avatar": "avatar-2",
         "x": 450,
         "y": 500,
         "direction": "down",
@@ -221,6 +236,7 @@ const socket = io('http://localhost:3000', {
   {
     "userId": "alice-uuid",
     "displayName": "Alice",
+    "avatar": "avatar-1",
     "x": 500,
     "y": 500,
     "direction": "down"
@@ -229,7 +245,24 @@ const socket = io('http://localhost:3000', {
 
 ---
 
-#### 2. Player Movement
+#### 2. Avatar Update
+* **Client emits**: `player:update-avatar`
+  ```json
+  {
+    "avatar": "avatar-3"
+  }
+  ```
+* **Server broadcasts to room**: `player:avatar-updated`
+  ```json
+  {
+    "userId": "alice-uuid",
+    "avatar": "avatar-3"
+  }
+  ```
+
+---
+
+#### 3. Player Movement
 * **Client emits**: `player:move`
   ```json
   {
