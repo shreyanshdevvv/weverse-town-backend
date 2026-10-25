@@ -5,6 +5,12 @@ import { AppModule } from './app.module.js';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Enable CORS for frontend clients (React/Phaser)
+  app.enableCors();
+
+  // Ensure database pools disconnect cleanly on SIGINT/SIGTERM
+  app.enableShutdownHooks();
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
