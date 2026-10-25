@@ -22,6 +22,7 @@ export interface PlayerState {
   direction: 'up' | 'down' | 'left' | 'right';
   lastMoveTime: number;
   nearbyPeers: Set<string>; // userIds currently within proximity range (150px)
+  isScreenSharing?: boolean;
 }
 
 export interface RoomState {
@@ -49,6 +50,16 @@ export interface MovePayload {
 
 export interface ChatSendPayload {
   content: string;
+}
+
+export interface WebRtcSignalPayload {
+  targetUserId: string;
+  sdp?: any;
+  candidate?: any;
+}
+
+export interface ScreenSharePayload {
+  isSharing: boolean;
 }
 
 @WebSocketGateway({
@@ -128,7 +139,6 @@ export class RealtimeGateway
       if (room) {
         const leavingPlayer = room.players.get(user.id);
 
-        // Notify all nearby peers that this player left proximity
         if (leavingPlayer) {
           for (const peerId of leavingPlayer.nearbyPeers) {
             const peer = room.players.get(peerId);
@@ -212,11 +222,11 @@ export class RealtimeGateway
       direction: 'down',
       lastMoveTime: Date.now(),
       nearbyPeers: new Set(),
+      isScreenSharing: false,
     };
 
     room.players.set(user.id, playerState);
 
-    // Check proximity on spawn
     this.updateProximity(data.roomId, playerState, client);
 
     const serializedPlayers = Array.from(room.players.values()).map((p) => ({
@@ -226,6 +236,7 @@ export class RealtimeGateway
       y: p.y,
       direction: p.direction,
       nearbyPeers: Array.from(p.nearbyPeers),
+      isScreenSharing: !!p.isScreenSharing,
     }));
 
     client.emit('room:state', {
@@ -319,7 +330,6 @@ export class RealtimeGateway
     currentPlayer.direction = data.direction ?? currentPlayer.direction;
     currentPlayer.lastMoveTime = now;
 
-    // Run Proximity Engine checks
     this.updateProximity(roomId, currentPlayer, client);
 
     const moveEvent = {
@@ -335,9 +345,6 @@ export class RealtimeGateway
     return { success: true, ...moveEvent };
   }
 
-  /**
-   * In-Room Chat: Persists to PostgreSQL and broadcasts to the room channel
-   */
   @SubscribeMessage('chat:send')
   async handleChatMessage(
     @ConnectedSocket() client: AuthenticatedSocket,
@@ -354,7 +361,6 @@ export class RealtimeGateway
       return { success: false, error: 'Message cannot be empty' };
     }
 
-    // Save to PostgreSQL via ChatService
     const saved = await this.chatService.saveMessage(
       roomId,
       user.id,
@@ -370,17 +376,158 @@ export class RealtimeGateway
       createdAt: saved.createdAt.toISOString(),
     };
 
-    // Broadcast to EVERYONE in the room (including sender)
     this.server.to(roomId).emit('chat:message', chatEvent);
 
     return { success: true, message: chatEvent };
   }
 
+  // ==========================================
+  // WebRTC Proximity Signaling Handlers
+  // ==========================================
+
   /**
-   * Proximity Engine: Calculates distance to other players in room
-   * Emits proximity:enter when d <= 150px
-   * Emits proximity:leave when d > 150px
+   * Relay SDP Offer to a peer within proximity
    */
+  @SubscribeMessage('webrtc:offer')
+  handleWebRtcOffer(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: WebRtcSignalPayload,
+  ) {
+    const check = this.validateSignalTarget(client, data?.targetUserId);
+    if (!check.valid) {
+      return { success: false, error: check.error };
+    }
+
+    this.server.to(check.targetSocketId!).emit('webrtc:offer', {
+      fromUserId: client.data.user.id,
+      sdp: data.sdp,
+    });
+
+    return { success: true };
+  }
+
+  /**
+   * Relay SDP Answer back to the offer initiator
+   */
+  @SubscribeMessage('webrtc:answer')
+  handleWebRtcAnswer(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: WebRtcSignalPayload,
+  ) {
+    const check = this.validateSignalTarget(client, data?.targetUserId);
+    if (!check.valid) {
+      return { success: false, error: check.error };
+    }
+
+    this.server.to(check.targetSocketId!).emit('webrtc:answer', {
+      fromUserId: client.data.user.id,
+      sdp: data.sdp,
+    });
+
+    return { success: true };
+  }
+
+  /**
+   * Relay ICE Candidate for NAT traversal
+   */
+  @SubscribeMessage('webrtc:ice-candidate')
+  handleIceCandidate(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: WebRtcSignalPayload,
+  ) {
+    const check = this.validateSignalTarget(client, data?.targetUserId);
+    if (!check.valid) {
+      return { success: false, error: check.error };
+    }
+
+    this.server.to(check.targetSocketId!).emit('webrtc:ice-candidate', {
+      fromUserId: client.data.user.id,
+      candidate: data.candidate,
+    });
+
+    return { success: true };
+  }
+
+  /**
+   * Screen Sharing Toggle: Broadcast to nearby peers
+   */
+  @SubscribeMessage('screen:share-toggle')
+  handleScreenShareToggle(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: ScreenSharePayload,
+  ) {
+    const user = client.data.user;
+    const roomId = client.data.roomId;
+
+    if (!roomId) return { success: false, error: 'Not in a room' };
+
+    const room = this.rooms.get(roomId);
+    if (!room) return { success: false, error: 'Room not found' };
+
+    const player = room.players.get(user.id);
+    if (!player) return { success: false, error: 'Player not found' };
+
+    player.isScreenSharing = !!data.isSharing;
+
+    // Notify all nearby peers in audio/video range
+    for (const peerId of player.nearbyPeers) {
+      const peerSocketId = this.userSockets.get(peerId);
+      if (peerSocketId) {
+        this.server.to(peerSocketId).emit('screen:user-sharing', {
+          userId: user.id,
+          isSharing: player.isScreenSharing,
+        });
+      }
+    }
+
+    return { success: true, isSharing: player.isScreenSharing };
+  }
+
+  // ==========================================
+  // Helper Methods
+  // ==========================================
+
+  private validateSignalTarget(
+    client: AuthenticatedSocket,
+    targetUserId: string,
+  ): { valid: boolean; targetSocketId?: string; error?: string } {
+    const user = client.data?.user;
+    const roomId = client.data?.roomId;
+
+    if (!roomId || !user) {
+      return { valid: false, error: 'You are not in an active room' };
+    }
+
+    if (!targetUserId) {
+      return { valid: false, error: 'targetUserId is required' };
+    }
+
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      return { valid: false, error: 'Room state not found in memory' };
+    }
+
+    const player = room.players.get(user.id);
+    if (!player) {
+      return { valid: false, error: 'Your presence is not active in this room' };
+    }
+
+    // Security: Only allow signaling if target is within proximity range
+    if (!player.nearbyPeers.has(targetUserId)) {
+      return {
+        valid: false,
+        error: 'Target user is not within proximity range for media connection',
+      };
+    }
+
+    const targetSocketId = this.userSockets.get(targetUserId);
+    if (!targetSocketId) {
+      return { valid: false, error: 'Target user socket is no longer connected' };
+    }
+
+    return { valid: true, targetSocketId };
+  }
+
   private updateProximity(
     roomId: string,
     player: PlayerState,
@@ -403,7 +550,6 @@ export class RealtimeGateway
       const otherSocketId = this.userSockets.get(otherId);
 
       if (isNearby && !wasNearby) {
-        // ENTER proximity
         player.nearbyPeers.add(otherId);
         otherPlayer.nearbyPeers.add(player.userId);
 
@@ -419,7 +565,6 @@ export class RealtimeGateway
           });
         }
       } else if (!isNearby && wasNearby) {
-        // LEAVE proximity
         player.nearbyPeers.delete(otherId);
         otherPlayer.nearbyPeers.delete(player.userId);
 
