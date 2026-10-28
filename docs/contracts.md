@@ -31,6 +31,11 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
 - **Socket.IO Gateway URL**: `http://localhost:3000`
 - **CORS**: Enabled for all frontend origins (`*`).
 - **Auth Header format**: `Authorization: Bearer <accessToken>`
+- **Rate Limiting**:
+  - Global: 100 requests / minute
+  - Sensitive endpoints (`/auth/register`, `/auth/login`): 5 requests / minute
+  - Room join (`/rooms/join`): 10 requests / minute
+  - Exceeding returns `429 Too Many Requests`
 
 ---
 
@@ -104,9 +109,22 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
     "name": "Town Hall",
     "maxPlayers": 25,
     "width": 1000,
-    "height": 1000
+    "height": 1000,
+    "spawnX": 500,
+    "spawnY": 500,
+    "zones": [
+      {
+        "id": "zone-pod-alpha",
+        "name": "Meeting Pod Alpha",
+        "x": 100,
+        "y": 100,
+        "width": 250,
+        "height": 200
+      }
+    ]
   }
   ```
+*(Note: If `zones` is omitted, server auto-provisions two default meeting spaces: "Meeting Pod Alpha" and "Executive Lounge")*
 - **Response (`201 Created`)**:
   ```json
   {
@@ -117,6 +135,9 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
     "maxPlayers": 25,
     "width": 1000,
     "height": 1000,
+    "spawnX": 500,
+    "spawnY": 500,
+    "zones": [...],
     "createdAt": "..."
   }
   ```
@@ -147,12 +168,110 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
 - **Endpoint**: `GET /rooms/:id`
 - **Response (`200 OK`)**: Room metadata, dimensions, creator, and current members.
 
+#### 8. Update Room (OWNER Only)
+- **Endpoint**: `PATCH /rooms/:id`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Body** (all fields optional):
+  ```json
+  {
+    "name": "Upgraded Town Hall",
+    "width": 1500,
+    "height": 1200,
+    "maxPlayers": 50
+  }
+  ```
+- **Response (`200 OK`)**: Updated Room object.
+- **Side Effect**: Emits `room:updated` over Socket.IO to all connected players.
+
+#### 9. Delete Room (OWNER Only)
+- **Endpoint**: `DELETE /rooms/:id`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "message": "Room deleted successfully",
+    "roomId": "room-uuid"
+  }
+  ```
+- **Side Effect**: Broadcasts `room:deleted` with `{ roomId, reason: "The room has been deleted by the owner" }` to all active sockets in the room, purges server memory, and forcibly kicks all sockets from the room channel.
+
+#### 10. Leave Room (Non-Owner Members)
+- **Endpoint**: `POST /rooms/:id/leave`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "message": "Left room successfully",
+    "roomId": "room-uuid"
+  }
+  ```
+- **Error (`400 Bad Request`)**: Room owner cannot leave their own room (must delete room or transfer ownership).
+- **Side Effect**: Removes user from in-memory room state and broadcasts `player:left` to remaining peers.
+
+#### 11. Regenerate Invite Code (OWNER & MODERATOR)
+- **Endpoint**: `POST /rooms/:id/regenerate-invite`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "message": "Invite code regenerated successfully",
+    "inviteCode": "K8X2M9"
+  }
+  ```
+
+#### 12. Kick Member (OWNER or MODERATOR)
+- **Endpoint**: `DELETE /rooms/:id/members/:memberId`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Hierarchy Rules**:
+  - `OWNER` can kick `MODERATOR` and `MEMBER`.
+  - `MODERATOR` can kick `MEMBER` (cannot kick other `MODERATOR`s or `OWNER`).
+  - Cannot kick the room `OWNER`.
+  - Cannot kick oneself.
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "message": "Member kicked successfully",
+    "roomId": "room-uuid",
+    "memberId": "target-user-uuid"
+  }
+  ```
+- **Side Effect**:
+  - Kicked player's socket receives `player:kicked` with reason and is evicted from room channel.
+  - Their WebRTC proximity peers receive `proximity:leave`.
+  - Remaining players in room receive `player:left` with `{ userId, reason: "kicked" }`.
+
+#### 13. Update Member Role (OWNER Only)
+- **Endpoint**: `PATCH /rooms/:id/members/:memberId/role`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Body**:
+  ```json
+  {
+    "role": "MODERATOR"
+  }
+  ```
+- **Allowed values**: `"MODERATOR"`, `"MEMBER"`
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "message": "Member role updated successfully",
+    "roomId": "room-uuid",
+    "memberId": "target-user-uuid",
+    "role": "MODERATOR"
+  }
+  ```
+- **Side Effect**: Broadcasts `room:member-role-updated` to all active sockets in the room.
+
 ---
 
 ### Chat History
 
-#### 8. Get Recent Room Messages
+#### 14. Get Public Room Messages
 - **Endpoint**: `GET /rooms/:roomId/messages?limit=50`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Response (`200 OK`)**: Array of general room chat messages.
+
+#### 15. Get 1-on-1 Direct Message (DM) History
+- **Endpoint**: `GET /rooms/:roomId/messages/dm/:peerId?limit=50`
 - **Headers**: `Authorization: Bearer <accessToken>`
 - **Response (`200 OK`)**:
   ```json
@@ -160,13 +279,30 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
     {
       "id": "msg-uuid",
       "roomId": "room-uuid",
-      "senderId": "user-uuid",
-      "content": "Hey everyone!",
+      "senderId": "alice-uuid",
+      "recipientId": "bob-uuid",
+      "content": "Hey Bob, let's sync in Pod Alpha",
       "createdAt": "2026-10-25T...",
-      "sender": {
-        "id": "user-uuid",
-        "displayName": "Alice"
-      }
+      "sender": { "id": "alice-uuid", "displayName": "Alice" },
+      "recipient": { "id": "bob-uuid", "displayName": "Bob" }
+    }
+  ]
+  ```
+
+#### 16. Get Meeting Pod / Zone Chat History
+- **Endpoint**: `GET /rooms/:roomId/messages/zone/:zoneId?limit=50`
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Response (`200 OK`)**:
+  ```json
+  [
+    {
+      "id": "msg-uuid",
+      "roomId": "room-uuid",
+      "zoneId": "zone-pod-alpha",
+      "senderId": "alice-uuid",
+      "content": "Here is the presentation deck link",
+      "createdAt": "2026-10-25T...",
+      "sender": { "id": "alice-uuid", "displayName": "Alice" }
     }
   ]
   ```
@@ -211,12 +347,24 @@ const socket = io('http://localhost:3000', {
     }
   }
   ```
-* **Server emits to joining client**: `room:state` (Snapshot of all active players in room)
+* **Server emits to joining client**: `room:state` (Snapshot of room configuration, private zones, and all active players)
   ```json
   {
     "roomId": "room-uuid",
     "width": 1000,
     "height": 1000,
+    "spawnX": 500,
+    "spawnY": 500,
+    "zones": [
+      {
+        "id": "zone-pod-alpha",
+        "name": "Meeting Pod Alpha",
+        "x": 100,
+        "y": 100,
+        "width": 250,
+        "height": 200
+      }
+    ],
     "players": [
       {
         "userId": "bob-uuid",
@@ -225,6 +373,7 @@ const socket = io('http://localhost:3000', {
         "x": 450,
         "y": 500,
         "direction": "down",
+        "currentZoneId": null,
         "nearbyPeers": [],
         "isScreenSharing": false
       }
@@ -245,7 +394,25 @@ const socket = io('http://localhost:3000', {
 
 ---
 
-#### 2. Avatar Update
+#### 2. Zone Entered / Left (Private Meeting Space Feedback)
+* **Server emits to player**: `zone:entered`
+  ```json
+  {
+    "zoneId": "zone-pod-alpha",
+    "zoneName": "Meeting Pod Alpha"
+  }
+  ```
+* **Server emits to player**: `zone:left`
+  ```json
+  {
+    "zoneId": "zone-pod-alpha"
+  }
+  ```
+* **Frontend Handling**: Display toast / banner indicating private meeting status.
+
+---
+
+#### 3. Avatar Update
 * **Client emits**: `player:update-avatar`
   ```json
   {
@@ -262,7 +429,7 @@ const socket = io('http://localhost:3000', {
 
 ---
 
-#### 3. Player Movement
+#### 4. Player Movement
 * **Client emits**: `player:move`
   ```json
   {
@@ -278,6 +445,7 @@ const socket = io('http://localhost:3000', {
     "x": 510,
     "y": 500,
     "direction": "right",
+    "currentZoneId": "zone-pod-alpha",
     "timestamp": 1700000000000
   }
   ```
@@ -285,7 +453,7 @@ const socket = io('http://localhost:3000', {
 
 ---
 
-#### 3. Player Disconnection
+#### 5. Player Disconnection
 * **Server broadcasts to others**: `player:left`
   ```json
   {
@@ -295,7 +463,52 @@ const socket = io('http://localhost:3000', {
 
 ---
 
-#### 4. Text Chat
+#### 6. Teams-Style 1-on-1 Direct Message (DM)
+* **Client emits**: `chat:dm`
+  ```json
+  {
+    "recipientId": "bob-uuid",
+    "content": "Hey Bob, let's sync in Pod Alpha"
+  }
+  ```
+* **Server relays ONLY to recipient and sender socket**: `chat:dm`
+  ```json
+  {
+    "id": "msg-uuid",
+    "roomId": "room-uuid",
+    "senderId": "alice-uuid",
+    "senderName": "Alice",
+    "recipientId": "bob-uuid",
+    "content": "Hey Bob, let's sync in Pod Alpha",
+    "createdAt": "2026-10-25T..."
+  }
+  ```
+
+---
+
+#### 7. Private Meeting Zone Chat
+* **Client emits**: `chat:zone` (Player must be inside a meeting zone)
+  ```json
+  {
+    "content": "Meeting agenda: Q4 goals"
+  }
+  ```
+* **Server relays ONLY to players inside that same zone**: `chat:zone`
+  ```json
+  {
+    "id": "msg-uuid",
+    "roomId": "room-uuid",
+    "zoneId": "zone-pod-alpha",
+    "senderId": "alice-uuid",
+    "senderName": "Alice",
+    "content": "Meeting agenda: Q4 goals",
+    "createdAt": "2026-10-25T..."
+  }
+  ```
+
+---
+
+#### 8. Commons Room Chat (Fallback / General)
 * **Client emits**: `chat:send`
   ```json
   {
@@ -316,23 +529,88 @@ const socket = io('http://localhost:3000', {
 
 ---
 
+#### 5. Room Deleted / Eviction Notice
+* **Server broadcasts to room**: `room:deleted`
+  ```json
+  {
+    "roomId": "room-uuid",
+    "reason": "The room has been deleted by the owner"
+  }
+  ```
+* **Frontend Handling**:
+  - Show modal / notification: *"The room has been deleted by the owner"*.
+  - Disconnect WebRTC audio/video tracks.
+  - Redirect player back to dashboard / room list (`/rooms` or `/dashboard`).
+
+---
+
+#### 6. Room Updated Notice
+* **Server broadcasts to room**: `room:updated`
+  ```json
+  {
+    "roomId": "room-uuid",
+    "name": "New Room Title",
+    "width": 1500,
+    "height": 1200,
+    "maxPlayers": 50
+  }
+  ```
+* **Frontend Handling**: Update canvas viewport boundaries and room header dynamically without requiring a page reload.
+
+---
+
+#### 7. Player Kicked Notice (Sent to target client)
+* **Server emits directly to kicked client**: `player:kicked`
+  ```json
+  {
+    "roomId": "room-uuid",
+    "reason": "You have been kicked from the room by a moderator or owner"
+  }
+  ```
+* **Frontend Handling**:
+  - Display alert or toast: *"You have been kicked from this room."*
+  - Close all active WebRTC peer connections.
+  - Redirect player back to `/dashboard`.
+
+---
+
+#### 8. Member Role Updated Notice
+* **Server broadcasts to room**: `room:member-role-updated`
+  ```json
+  {
+    "roomId": "room-uuid",
+    "userId": "target-user-uuid",
+    "role": "MODERATOR"
+  }
+  ```
+* **Frontend Handling**: Update the participant list badge / permissions in the UI in real time.
+
+---
+
 ## 5. WebRTC Proximity Audio/Video Protocol
 
-### Proximity Triggers (Distance Threshold: 150px)
+### Gather.town 2-Tier Proximity Hierarchy
 
-The backend triggers connection and teardown automatically based on avatar coordinates:
+The backend evaluates real-time peer proximity using a **soundproof zone hierarchy**:
+
+1. **Private Meeting Pods (Soundproof Isolation)**:
+   - When Player A and Player B are **both inside the same private meeting zone** (e.g. `zone-pod-alpha`), `proximity:enter` is automatically triggered.
+   - Anyone standing outside that private zone (even $5\text{px}$ away outside the boundary) **cannot** hear or see them.
+2. **Commons / Public Hallways**:
+   - When both players are outside any private meeting zone, standard **$150\text{px}$ Euclidean distance** triggers `proximity:enter` and `proximity:leave`.
 
 #### `proximity:enter` (Server $\rightarrow$ Client)
-Sent when another player enters within 150px range:
+Sent when another player enters audio/video range:
 ```json
 {
   "peerId": "bob-uuid",
-  "displayName": "Bob"
+  "displayName": "Bob",
+  "zoneId": "zone-pod-alpha"
 }
 ```
 
 #### `proximity:leave` (Server $\rightarrow$ Client)
-Sent when that player walks farther than 150px away or disconnects:
+Sent when that player walks farther than 150px away, exits the private zone, or disconnects:
 ```json
 {
   "peerId": "bob-uuid"

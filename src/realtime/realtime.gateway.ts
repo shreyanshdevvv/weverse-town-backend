@@ -14,6 +14,16 @@ import { JwtService } from '@nestjs/jwt';
 import { AuthService } from '../auth/auth.service.js';
 import { RoomsService } from '../rooms/rooms.service.js';
 import { ChatService } from '../chat/chat.service.js';
+import { AppEventsService } from '../common/events/events.service.js';
+
+export interface RoomZone {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export interface PlayerState {
   userId: string;
@@ -25,11 +35,15 @@ export interface PlayerState {
   lastMoveTime: number;
   nearbyPeers: Set<string>; // userIds currently within proximity range (150px)
   isScreenSharing?: boolean;
+  currentZoneId?: string | null;
 }
 
 export interface RoomState {
   width: number;
   height: number;
+  spawnX?: number;
+  spawnY?: number;
+  zones?: RoomZone[];
   players: Map<string, PlayerState>;
 }
 
@@ -52,6 +66,15 @@ export interface MovePayload {
 }
 
 export interface ChatSendPayload {
+  content: string;
+}
+
+export interface DirectMessagePayload {
+  recipientId: string;
+  content: string;
+}
+
+export interface ZoneMessagePayload {
   content: string;
 }
 
@@ -95,9 +118,106 @@ export class RealtimeGateway
     private readonly authService: AuthService,
     private readonly roomsService: RoomsService,
     private readonly chatService: ChatService,
+    private readonly events: AppEventsService,
   ) {}
 
   afterInit(server: Server) {
+    // Listen for room deletion event from REST service
+    this.events.on('room:deleted', ({ roomId, reason }) => {
+      this.server.to(roomId).emit('room:deleted', {
+        roomId,
+        reason: reason || 'The room has been deleted by the owner',
+      });
+      // Force all sockets to leave the channel
+      this.server.socketsLeave(roomId);
+      // Clean up in-memory room state
+      this.rooms.delete(roomId);
+      this.logger.log(`Room ${roomId} deleted. Active sockets notified and evacuated.`);
+    });
+
+    // Listen for room update event from REST service
+    this.events.on('room:updated', (data) => {
+      const room = this.rooms.get(data.roomId);
+      if (room) {
+        if (data.width) room.width = data.width;
+        if (data.height) room.height = data.height;
+        if (data.spawnX !== undefined) room.spawnX = data.spawnX;
+        if (data.spawnY !== undefined) room.spawnY = data.spawnY;
+        if (data.zones !== undefined) room.zones = data.zones;
+      }
+      this.server.to(data.roomId).emit('room:updated', data);
+    });
+
+    // Listen for member departure
+    this.events.on('room:member-left', ({ roomId, userId }) => {
+      const room = this.rooms.get(roomId);
+      if (room) {
+        room.players.delete(userId);
+      }
+      this.server.to(roomId).emit('player:left', { userId });
+      const userSocketId = this.userSockets.get(userId);
+      if (userSocketId) {
+        const socket = this.server.sockets.sockets.get(userSocketId);
+        socket?.leave(roomId);
+      }
+    });
+
+    // Listen for member kicked
+    this.events.on(
+      'room:member-kicked',
+      ({ roomId, memberUserId, kickedByUserId, reason }) => {
+        const room = this.rooms.get(roomId);
+        if (room) {
+          // If the player had active proximity connections, alert them
+          const player = room.players.get(memberUserId);
+          if (player) {
+            for (const peerId of player.nearbyPeers) {
+              const peerSocketId = this.userSockets.get(peerId);
+              if (peerSocketId) {
+                this.server.to(peerSocketId).emit('proximity:leave', {
+                  peerId: memberUserId,
+                });
+              }
+              const peer = room.players.get(peerId);
+              peer?.nearbyPeers.delete(memberUserId);
+            }
+          }
+          room.players.delete(memberUserId);
+        }
+
+        // Notify and evict the kicked user's socket directly
+        const userSocketId = this.userSockets.get(memberUserId);
+        if (userSocketId) {
+          const socket = this.server.sockets.sockets?.get(userSocketId);
+          if (socket) {
+            socket.emit('player:kicked', {
+              roomId,
+              reason: reason || 'You have been kicked from this room',
+            });
+            socket.leave(roomId);
+            if (socket.data) {
+              delete socket.data.roomId;
+            }
+          }
+        }
+
+        // Notify the remaining room peers
+        this.server.to(roomId).emit('player:left', {
+          userId: memberUserId,
+          reason: 'kicked',
+        });
+      },
+    );
+
+    // Listen for member role updated
+    this.events.on('room:member-role-updated', ({ roomId, memberUserId, role }) => {
+      this.server.to(roomId).emit('room:member-role-updated', {
+        roomId,
+        userId: memberUserId,
+        role,
+      });
+    });
+
     server.use(async (socket: any, next) => {
       try {
         const token =
@@ -239,6 +359,9 @@ export class RealtimeGateway
       this.rooms.set(data.roomId, {
         width: roomDetails.width,
         height: roomDetails.height,
+        spawnX: (roomDetails as any).spawnX ?? 500,
+        spawnY: (roomDetails as any).spawnY ?? 500,
+        zones: (roomDetails as any).zones || [],
         players: new Map(),
       });
     }
@@ -258,10 +381,14 @@ export class RealtimeGateway
     client.data.roomId = data.roomId;
 
     const playerCount = room.players.size;
-    // Stagger horizontal spawn positions: 1000, 1044, 956, 1088, 912... so players do not overlap
+    // Stagger horizontal spawn positions: +0, +44, -44, +88, -88... so players do not overlap
     const spread = (playerCount % 2 === 0 ? 1 : -1) * Math.ceil(playerCount / 2) * 44;
-    const spawnX = Math.floor(room.width / 2) + spread;
-    const spawnY = 480; // Main Lobby reception area (obstacle-free)
+    const baseSpawnX = room.spawnX ?? Math.floor(room.width / 2);
+    const baseSpawnY = room.spawnY ?? 480;
+    const spawnX = Math.max(20, Math.min(room.width - 20, baseSpawnX + spread));
+    const spawnY = baseSpawnY;
+
+    const initialZone = this.getZoneAt(room, spawnX, spawnY);
 
     const playerState: PlayerState = {
       userId: user.id,
@@ -273,11 +400,19 @@ export class RealtimeGateway
       lastMoveTime: Date.now(),
       nearbyPeers: new Set(),
       isScreenSharing: false,
+      currentZoneId: initialZone ? initialZone.id : null,
     };
 
     room.players.set(user.id, playerState);
 
     this.updateProximity(data.roomId, playerState, client);
+
+    if (initialZone) {
+      client.emit('zone:entered', {
+        zoneId: initialZone.id,
+        zoneName: initialZone.name,
+      });
+    }
 
     const serializedPlayers = Array.from(room.players.values()).map((p) => ({
       userId: p.userId,
@@ -288,12 +423,16 @@ export class RealtimeGateway
       direction: p.direction,
       nearbyPeers: Array.from(p.nearbyPeers),
       isScreenSharing: !!p.isScreenSharing,
+      currentZoneId: p.currentZoneId ?? null,
     }));
 
     client.emit('room:state', {
       roomId: data.roomId,
       width: room.width,
       height: room.height,
+      spawnX: room.spawnX ?? 500,
+      spawnY: room.spawnY ?? 500,
+      zones: room.zones || [],
       players: serializedPlayers,
     });
 
@@ -387,6 +526,25 @@ export class RealtimeGateway
     currentPlayer.direction = data.direction ?? currentPlayer.direction;
     currentPlayer.lastMoveTime = now;
 
+    // Detect meeting zone transitions (entering/leaving private soundproof spaces)
+    const prevZoneId = currentPlayer.currentZoneId ?? null;
+    const newZone = this.getZoneAt(room, currentPlayer.x, currentPlayer.y);
+    const newZoneId = newZone ? newZone.id : null;
+
+    if (prevZoneId !== newZoneId) {
+      currentPlayer.currentZoneId = newZoneId;
+      if (newZone) {
+        client.emit('zone:entered', {
+          zoneId: newZone.id,
+          zoneName: newZone.name,
+        });
+      } else if (prevZoneId) {
+        client.emit('zone:left', {
+          zoneId: prevZoneId,
+        });
+      }
+    }
+
     this.updateProximity(roomId, currentPlayer, client);
 
     const moveEvent = {
@@ -394,6 +552,7 @@ export class RealtimeGateway
       x: currentPlayer.x,
       y: currentPlayer.y,
       direction: currentPlayer.direction,
+      currentZoneId: currentPlayer.currentZoneId ?? null,
       timestamp: now,
     };
 
@@ -476,6 +635,122 @@ export class RealtimeGateway
     this.server.to(roomId).emit('chat:message', chatEvent);
 
     return { success: true, message: chatEvent };
+  }
+
+  @SubscribeMessage('chat:dm')
+  async handleDirectMessage(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: DirectMessagePayload,
+  ) {
+    const user = await this.getOrAuthenticateUser(client);
+    const roomId = client.data?.roomId;
+
+    if (!user) {
+      return { success: false, error: 'Unauthorized: User session not found' };
+    }
+
+    if (!roomId) {
+      return { success: false, error: 'You must join a room before chatting' };
+    }
+
+    if (!data?.recipientId) {
+      return { success: false, error: 'recipientId is required' };
+    }
+
+    if (!data?.content?.trim()) {
+      return { success: false, error: 'Message cannot be empty' };
+    }
+
+    const saved = await this.chatService.saveMessage(
+      roomId,
+      user.id,
+      data.content,
+      { recipientId: data.recipientId },
+    );
+
+    const dmEvent = {
+      id: saved.id,
+      roomId: saved.roomId,
+      senderId: saved.senderId,
+      senderName: saved.sender.displayName,
+      recipientId: saved.recipientId,
+      content: saved.content,
+      createdAt: saved.createdAt.toISOString(),
+    };
+
+    // Deliver to recipient socket if online
+    const targetSocketId = this.userSockets.get(data.recipientId);
+    if (targetSocketId) {
+      this.server.to(targetSocketId).emit('chat:dm', dmEvent);
+    }
+
+    // Deliver confirmation back to sender socket
+    client.emit('chat:dm', dmEvent);
+
+    return { success: true, message: dmEvent };
+  }
+
+  @SubscribeMessage('chat:zone')
+  async handleZoneMessage(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: ZoneMessagePayload,
+  ) {
+    const user = await this.getOrAuthenticateUser(client);
+    const roomId = client.data?.roomId;
+
+    if (!user) {
+      return { success: false, error: 'Unauthorized: User session not found' };
+    }
+
+    if (!roomId) {
+      return { success: false, error: 'You must join a room before chatting' };
+    }
+
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      return { success: false, error: 'Room not found' };
+    }
+
+    const player = room.players.get(user.id);
+    if (!player || !player.currentZoneId) {
+      return {
+        success: false,
+        error: 'You must be inside a private meeting zone to use zone chat',
+      };
+    }
+
+    if (!data?.content?.trim()) {
+      return { success: false, error: 'Message cannot be empty' };
+    }
+
+    const saved = await this.chatService.saveMessage(
+      roomId,
+      user.id,
+      data.content,
+      { zoneId: player.currentZoneId },
+    );
+
+    const zoneEvent = {
+      id: saved.id,
+      roomId: saved.roomId,
+      zoneId: player.currentZoneId,
+      senderId: saved.senderId,
+      senderName: saved.sender.displayName,
+      content: saved.content,
+      createdAt: saved.createdAt.toISOString(),
+    };
+
+    // Deliver only to users currently inside this same private zone
+    for (const [peerId, peerPlayer] of room.players) {
+      if (peerPlayer.currentZoneId === player.currentZoneId) {
+        const peerSocketId = this.userSockets.get(peerId);
+        if (peerSocketId) {
+          this.server.to(peerSocketId).emit('chat:zone', zoneEvent);
+        }
+      }
+    }
+
+    return { success: true, message: zoneEvent };
   }
 
   // ==========================================
@@ -626,6 +901,21 @@ export class RealtimeGateway
     return { valid: true, targetSocketId };
   }
 
+  private getZoneAt(room: RoomState, x: number, y: number): RoomZone | null {
+    if (!room.zones || !Array.isArray(room.zones)) return null;
+    for (const zone of room.zones) {
+      if (
+        x >= zone.x &&
+        x <= zone.x + zone.width &&
+        y >= zone.y &&
+        y <= zone.y + zone.height
+      ) {
+        return zone;
+      }
+    }
+    return null;
+  }
+
   private updateProximity(
     roomId: string,
     player: PlayerState,
@@ -637,14 +927,30 @@ export class RealtimeGateway
     for (const [otherId, otherPlayer] of room.players) {
       if (otherId === player.userId) continue;
 
-      const distance = Math.sqrt(
-        Math.pow(player.x - otherPlayer.x, 2) +
-          Math.pow(player.y - otherPlayer.y, 2),
-      );
+      let isNearby = false;
 
-      const isNearby = distance <= this.PROXIMITY_RADIUS;
+      // Case 1: Both players in the same private meeting zone
+      if (
+        player.currentZoneId &&
+        otherPlayer.currentZoneId &&
+        player.currentZoneId === otherPlayer.currentZoneId
+      ) {
+        isNearby = true;
+      }
+      // Case 2: One player in a private zone, the other is outside (or in a different private zone)
+      else if (player.currentZoneId || otherPlayer.currentZoneId) {
+        isNearby = false; // Soundproof barrier!
+      }
+      // Case 3: Both players in the general/commons area
+      else {
+        const distance = Math.sqrt(
+          Math.pow(player.x - otherPlayer.x, 2) +
+            Math.pow(player.y - otherPlayer.y, 2),
+        );
+        isNearby = distance <= this.PROXIMITY_RADIUS;
+      }
+
       const wasNearby = player.nearbyPeers.has(otherId);
-
       const otherSocketId = this.userSockets.get(otherId);
 
       if (isNearby && !wasNearby) {
@@ -654,12 +960,14 @@ export class RealtimeGateway
         client.emit('proximity:enter', {
           peerId: otherId,
           displayName: otherPlayer.displayName,
+          zoneId: player.currentZoneId ?? null,
         });
 
         if (otherSocketId) {
           this.server.to(otherSocketId).emit('proximity:enter', {
             peerId: player.userId,
             displayName: player.displayName,
+            zoneId: otherPlayer.currentZoneId ?? null,
           });
         }
       } else if (!isNearby && wasNearby) {

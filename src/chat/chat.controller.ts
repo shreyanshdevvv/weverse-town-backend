@@ -34,4 +34,45 @@ export class ChatController {
     const parsedLimit = limit ? parseInt(limit, 10) : 50;
     return this.chatService.getRoomMessages(roomId, isNaN(parsedLimit) ? 50 : parsedLimit);
   }
+
+  @Get('dm/:peerId')
+  async getDirectMessages(
+    @Param('roomId', new ParseUUIDPipe()) roomId: string,
+    @Param('peerId', new ParseUUIDPipe()) peerId: string,
+    @CurrentUser() user: any,
+    @Query('limit') limit?: string,
+  ) {
+    const isMember = await this.roomsService.isUserInRoom(user.id, roomId);
+    if (!isMember) {
+      throw new ForbiddenException('You must be a member of this room to view chat');
+    }
+
+    const parsedLimit = limit ? parseInt(limit, 10) : 50;
+    return this.chatService.getDirectMessages(
+      roomId,
+      user.id,
+      peerId,
+      isNaN(parsedLimit) ? 50 : parsedLimit,
+    );
+  }
+
+  @Get('zone/:zoneId')
+  async getZoneMessages(
+    @Param('roomId', new ParseUUIDPipe()) roomId: string,
+    @Param('zoneId') zoneId: string,
+    @CurrentUser() user: any,
+    @Query('limit') limit?: string,
+  ) {
+    const isMember = await this.roomsService.isUserInRoom(user.id, roomId);
+    if (!isMember) {
+      throw new ForbiddenException('You must be a member of this room to view chat');
+    }
+
+    const parsedLimit = limit ? parseInt(limit, 10) : 50;
+    return this.chatService.getZoneMessages(
+      roomId,
+      zoneId,
+      isNaN(parsedLimit) ? 50 : parsedLimit,
+    );
+  }
 }

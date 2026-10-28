@@ -21,9 +21,10 @@ model User {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
-  memberships  RoomMember[]
-  rooms        Room[]        @relation("RoomOwner")
-  messages     Message[]
+  memberships      RoomMember[]
+  rooms            Room[]        @relation("RoomOwner")
+  sentMessages     Message[]     @relation("SentMessages")
+  receivedMessages Message[]     @relation("ReceivedMessages")
 
   @@map("users")
 }
@@ -36,6 +37,9 @@ model Room {
   maxPlayers  Int           @default(25)
   width       Int           @default(1000)
   height      Int           @default(1000)
+  spawnX      Int           @default(500)
+  spawnY      Int           @default(500)
+  zones       Json?         @default("[]")
   createdAt   DateTime      @default(now())
 
   createdBy   User          @relation("RoomOwner", fields: [createdById], references: [id], onDelete: Cascade)
@@ -60,15 +64,20 @@ model RoomMember {
 }
 
 model Message {
-  id        String    @id @default(uuid()) @db.Uuid
-  roomId    String    @db.Uuid
-  senderId  String    @db.Uuid
-  content   String
-  createdAt DateTime  @default(now())
+  id          String    @id @default(uuid()) @db.Uuid
+  roomId      String    @db.Uuid
+  senderId    String    @db.Uuid
+  recipientId String?   @db.Uuid
+  zoneId      String?
+  content     String
+  createdAt   DateTime  @default(now())
 
-  room      Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  sender    User      @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  room        Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  sender      User      @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  recipient   User?     @relation("ReceivedMessages", fields: [recipientId], references: [id], onDelete: Cascade)
 
   @@index([roomId, createdAt])
+  @@index([roomId, senderId, recipientId, createdAt])
+  @@index([roomId, zoneId, createdAt])
   @@map("messages")
 }

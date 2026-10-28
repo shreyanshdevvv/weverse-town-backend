@@ -31,4 +31,15 @@ export class CreateRoomDto {
   @Min(500, { message: 'Height must be at least 500' })
   @Max(5000, { message: 'Height cannot exceed 5000' })
   height?: number;
+
+  @IsOptional()
+  @IsInt()
+  spawnX?: number;
+
+  @IsOptional()
+  @IsInt()
+  spawnY?: number;
+
+  @IsOptional()
+  zones?: any[];
 }
