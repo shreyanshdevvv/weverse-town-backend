@@ -391,4 +391,45 @@ describe('RoomsService', () => {
       expect(result).toBe(false);
     });
   });
+
+  describe('findOne', () => {
+    it('should return room details if user is a member', async () => {
+      mockPrismaService.roomMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        roomId: 'room-1',
+      });
+      mockPrismaService.room.findUnique.mockResolvedValue({
+        id: 'room-1',
+        name: 'Design Room',
+        width: 2000,
+        height: 2000,
+        spawnX: 1000,
+        spawnY: 860,
+      });
+
+      const result = await roomsService.findOne('room-1', 'user-1');
+      expect(result.id).toBe('room-1');
+      expect(result.name).toBe('Design Room');
+    });
+
+    it('should throw ForbiddenException if user is not a member of the room', async () => {
+      mockPrismaService.roomMember.findUnique.mockResolvedValue(null);
+
+      await expect(roomsService.findOne('room-1', 'intruder-id')).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('should throw NotFoundException if room does not exist', async () => {
+      mockPrismaService.roomMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        roomId: 'room-1',
+      });
+      mockPrismaService.room.findUnique.mockResolvedValue(null);
+
+      await expect(roomsService.findOne('room-1', 'user-1')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
 });

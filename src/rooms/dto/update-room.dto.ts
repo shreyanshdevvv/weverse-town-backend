@@ -6,7 +6,12 @@ import {
   Min,
   Max,
   IsOptional,
+  IsArray,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { RoomZoneDto } from './room-zone.dto.js';
+import { RoomObstacleDto } from './room-obstacle.dto.js';
 
 export class UpdateRoomDto {
   @IsOptional()
@@ -35,12 +40,23 @@ export class UpdateRoomDto {
 
   @IsOptional()
   @IsInt()
+  @Min(0, { message: 'spawnX must be non-negative' })
   spawnX?: number;
 
   @IsOptional()
   @IsInt()
+  @Min(0, { message: 'spawnY must be non-negative' })
   spawnY?: number;
 
   @IsOptional()
-  zones?: any[];
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => RoomZoneDto)
+  zones?: RoomZoneDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => RoomObstacleDto)
+  obstacles?: RoomObstacleDto[];
 }

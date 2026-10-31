@@ -166,7 +166,9 @@ This project is a **2D Multiplayer Metaverse (Gather.town clone)** built with **
 
 #### 7. Get Room Details by ID
 - **Endpoint**: `GET /rooms/:id`
-- **Response (`200 OK`)**: Room metadata, dimensions, creator, and current members.
+- **Headers**: `Authorization: Bearer <accessToken>`
+- **Authorization**: Caller must be a member of the room. Returns `403 Forbidden` if user is not a member.
+- **Response (`200 OK`)**: Room metadata, dimensions, spawn points, meeting zones, obstacle collision boxes, creator, and current members list.
 
 #### 8. Update Room (OWNER Only)
 - **Endpoint**: `PATCH /rooms/:id`
@@ -347,22 +349,31 @@ const socket = io('http://localhost:3000', {
     }
   }
   ```
-* **Server emits to joining client**: `room:state` (Snapshot of room configuration, private zones, and all active players)
+* **Server emits to joining client**: `room:state` (Snapshot of room configuration, private zones, obstacles, and all active players)
   ```json
   {
     "roomId": "room-uuid",
-    "width": 1000,
-    "height": 1000,
-    "spawnX": 500,
-    "spawnY": 500,
+    "width": 2000,
+    "height": 2000,
+    "spawnX": 1000,
+    "spawnY": 860,
     "zones": [
       {
         "id": "zone-pod-alpha",
-        "name": "Meeting Pod Alpha",
-        "x": 100,
-        "y": 100,
-        "width": 250,
-        "height": 200
+        "name": "Design Room",
+        "x": 450,
+        "y": 150,
+        "width": 1100,
+        "height": 640
+      }
+    ],
+    "obstacles": [
+      {
+        "id": "wall-top",
+        "x": 0,
+        "y": 0,
+        "width": 2000,
+        "height": 32
       }
     ],
     "players": [
@@ -370,8 +381,8 @@ const socket = io('http://localhost:3000', {
         "userId": "bob-uuid",
         "displayName": "Bob",
         "avatar": "avatar-2",
-        "x": 450,
-        "y": 500,
+        "x": 1000,
+        "y": 860,
         "direction": "down",
         "currentZoneId": null,
         "nearbyPeers": [],
@@ -605,8 +616,23 @@ Sent when another player enters audio/video range:
 {
   "peerId": "bob-uuid",
   "displayName": "Bob",
-  "zoneId": "zone-pod-alpha"
+  "zoneId": "zone-pod-alpha",
+  "distance": 84
 }
+```
+
+#### `proximity:distance` (Server $\rightarrow$ Client)
+Sent continuously as players move within proximity range ($0$ to $150\text{px}$) for smooth audio volume attenuation:
+```json
+{
+  "peerId": "bob-uuid",
+  "distance": 62
+}
+```
+*Frontend Formula*:
+```ts
+const volume = Math.max(0, Math.min(1, 1 - distance / 150));
+peerAudioElement.volume = volume;
 ```
 
 #### `proximity:leave` (Server $\rightarrow$ Client)
@@ -617,6 +643,34 @@ Sent when that player walks farther than 150px away, exits the private zone, or 
 }
 ```
 *Action: Close the `RTCPeerConnection` for this `peerId` and remove their video/audio stream from the DOM.*
+
+#### `webrtc:peer-disconnected` (Server $\rightarrow$ Client)
+Sent immediately on player disconnect, kick, or room-switch to tear down WebRTC connections without waiting for ICE timeouts:
+```json
+{
+  "peerId": "bob-uuid"
+}
+```
+
+---
+
+#### 3. Pod Presence Notifications
+* **Server emits to peers inside the zone**: `zone:peer-entered`
+  ```json
+  {
+    "userId": "alice-uuid",
+    "displayName": "Alice",
+    "zoneId": "zone-pod-alpha"
+  }
+  ```
+* **Server emits to peers inside the zone**: `zone:peer-left`
+  ```json
+  {
+    "userId": "alice-uuid",
+    "displayName": "Alice",
+    "zoneId": "zone-pod-alpha"
+  }
+  ```
 
 ---
 

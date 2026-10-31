@@ -25,20 +25,74 @@ export class RoomsService {
     const defaultZones = [
       {
         id: 'zone-pod-alpha',
-        name: 'Meeting Pod Alpha',
-        x: 100,
-        y: 100,
-        width: 250,
-        height: 200,
+        name: 'Design Room',
+        x: 450,
+        y: 150,
+        width: 1100,
+        height: 640,
       },
       {
         id: 'zone-pod-beta',
-        name: 'Executive Lounge',
-        x: 650,
-        y: 100,
-        width: 250,
-        height: 200,
+        name: 'Focus Zone',
+        x: 100,
+        y: 960,
+        width: 820,
+        height: 940,
       },
+      {
+        id: 'zone-lounge',
+        name: 'Team Lounge',
+        x: 1080,
+        y: 960,
+        width: 820,
+        height: 940,
+      },
+    ];
+
+    const defaultObstacles = [
+      // Outer perimeter walls
+      { id: 'wall-top', x: 0, y: 0, width: 2000, height: 32 },
+      { id: 'wall-bottom', x: 0, y: 1968, width: 2000, height: 32 },
+      { id: 'wall-left', x: 0, y: 0, width: 32, height: 2000 },
+      { id: 'wall-right', x: 1968, y: 0, width: 32, height: 2000 },
+
+      // Design Room (x: 450..1550, y: 150..790)
+      { id: 'design-wall-north', x: 450, y: 138, width: 1100, height: 24 },
+      { id: 'design-wall-west', x: 438, y: 150, width: 24, height: 640 },
+      { id: 'design-wall-east', x: 1538, y: 150, width: 24, height: 640 },
+      // South wall with central doorway (doorway: x: 920 to 1080)
+      { id: 'design-wall-south-left', x: 450, y: 778, width: 470, height: 24 },
+      { id: 'design-wall-south-right', x: 1080, y: 778, width: 470, height: 24 },
+      // Design room furniture
+      { id: 'design-table', x: 830, y: 432, width: 340, height: 96 },
+      { id: 'design-whiteboard', x: 932, y: 171, width: 136, height: 48 },
+
+      // Focus Zone (x: 100..920, y: 960..1900)
+      // North wall with doorway at 800-920
+      { id: 'focus-wall-north', x: 100, y: 948, width: 700, height: 24 },
+      { id: 'focus-wall-west', x: 88, y: 960, width: 24, height: 940 },
+      { id: 'focus-wall-south', x: 100, y: 1888, width: 820, height: 24 },
+      // East wall with doorway at 1200-1360
+      { id: 'focus-wall-east-top', x: 908, y: 960, width: 24, height: 240 },
+      { id: 'focus-wall-east-bottom', x: 908, y: 1360, width: 24, height: 540 },
+      // Focus workstations
+      { id: 'focus-desk-1', x: 265, y: 1162, width: 150, height: 76 },
+      { id: 'focus-desk-2', x: 605, y: 1162, width: 150, height: 76 },
+      { id: 'focus-desk-3', x: 265, y: 1502, width: 150, height: 76 },
+      { id: 'focus-desk-4', x: 605, y: 1502, width: 150, height: 76 },
+
+      // Team Lounge (x: 1080..1900, y: 960..1900)
+      // North wall with doorway at 1080-1200
+      { id: 'lounge-wall-north', x: 1200, y: 948, width: 700, height: 24 },
+      { id: 'lounge-wall-east', x: 1888, y: 960, width: 24, height: 940 },
+      { id: 'lounge-wall-south', x: 1080, y: 1888, width: 820, height: 24 },
+      // West wall with doorway at 1200-1360
+      { id: 'lounge-wall-west-top', x: 1068, y: 960, width: 24, height: 240 },
+      { id: 'lounge-wall-west-bottom', x: 1068, y: 1360, width: 24, height: 540 },
+      // Lounge furniture
+      { id: 'lounge-sofa', x: 1340, y: 1250, width: 300, height: 160 },
+      { id: 'lounge-coffee-table', x: 1430, y: 1445, width: 120, height: 50 },
+      { id: 'lounge-counter', x: 1370, y: 1715, width: 240, height: 50 },
     ];
 
     // Atomic transaction: create Room + set creator as OWNER
@@ -49,11 +103,12 @@ export class RoomsService {
           inviteCode,
           createdById: userId,
           maxPlayers: dto.maxPlayers ?? 25,
-          width: dto.width ?? 1000,
-          height: dto.height ?? 1000,
-          spawnX: dto.spawnX ?? 500,
-          spawnY: dto.spawnY ?? 500,
-          zones: dto.zones ?? defaultZones,
+          width: dto.width ?? 2000,
+          height: dto.height ?? 2000,
+          spawnX: dto.spawnX ?? 1000,
+          spawnY: dto.spawnY ?? 860,
+          zones: (dto.zones ?? defaultZones) as any,
+          obstacles: (dto.obstacles ?? defaultObstacles) as any,
         },
       });
 
@@ -75,13 +130,14 @@ export class RoomsService {
     const updated = await this.prisma.room.update({
       where: { id: roomId },
       data: {
-        ...(dto.name && { name: dto.name }),
-        ...(dto.maxPlayers && { maxPlayers: dto.maxPlayers }),
-        ...(dto.width && { width: dto.width }),
-        ...(dto.height && { height: dto.height }),
+        ...(dto.name !== undefined && { name: dto.name }),
+        ...(dto.maxPlayers !== undefined && { maxPlayers: dto.maxPlayers }),
+        ...(dto.width !== undefined && { width: dto.width }),
+        ...(dto.height !== undefined && { height: dto.height }),
         ...(dto.spawnX !== undefined && { spawnX: dto.spawnX }),
         ...(dto.spawnY !== undefined && { spawnY: dto.spawnY }),
-        ...(dto.zones !== undefined && { zones: dto.zones }),
+        ...(dto.zones !== undefined && { zones: dto.zones as any }),
+        ...(dto.obstacles !== undefined && { obstacles: dto.obstacles as any }),
       },
     });
 
@@ -95,6 +151,7 @@ export class RoomsService {
       spawnX: updated.spawnX,
       spawnY: updated.spawnY,
       zones: updated.zones,
+      obstacles: updated.obstacles,
     });
 
     return updated;
@@ -339,6 +396,13 @@ export class RoomsService {
   }
 
   async findOne(roomId: string, userId: string) {
+    const isMember = await this.isUserInRoom(userId, roomId);
+    if (!isMember) {
+      throw new ForbiddenException(
+        'You must be a member of this room to view its details',
+      );
+    }
+
     const room = await this.prisma.room.findUnique({
       where: { id: roomId },
       include: {

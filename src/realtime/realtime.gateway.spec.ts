@@ -398,6 +398,7 @@ describe('RealtimeGateway', () => {
         peerId: 'bob',
         displayName: 'Bob',
         zoneId: 'zone-pod-alpha',
+        distance: expect.any(Number),
       });
     });
 
@@ -519,6 +520,131 @@ describe('RealtimeGateway', () => {
       }));
       // Charlie is in pod-beta, so Charlie should NOT receive it
       expect(mockClientCharlie.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Gather.town Authoritative Collision Physics & Audio Distance', () => {
+    it('should reject movement that collides with an obstacle and return correctedPosition', async () => {
+      const mockClient: any = {
+        data: { user: { id: 'alice', displayName: 'Alice' }, roomId: 'room-1' },
+        emit: vi.fn(),
+        to: vi.fn().mockReturnValue({ emit: vi.fn() }),
+      };
+
+      (gateway as any).rooms.set('room-1', {
+        width: 2000,
+        height: 2000,
+        obstacles: [
+          // Wall from x: 100 to 300, y: 100 to 120
+          { id: 'wall-1', x: 100, y: 100, width: 200, height: 20 },
+        ],
+        players: new Map([
+          [
+            'alice',
+            {
+              userId: 'alice',
+              displayName: 'Alice',
+              x: 1000,
+              y: 860,
+              direction: 'down',
+              lastMoveTime: Date.now() - 500,
+              nearbyPeers: new Set(),
+            },
+          ],
+        ]),
+      });
+
+      // Try moving into obstacle at x: 200, y: 110
+      const result = await gateway.handleMove(mockClient, { x: 200, y: 110, direction: 'up' });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Path blocked by obstacle');
+      expect(result.correctedPosition).toEqual({ x: 1000, y: 860 });
+    });
+
+    it('should allow movement into clear areas without obstacles', async () => {
+      const mockClient: any = {
+        data: { user: { id: 'alice', displayName: 'Alice' }, roomId: 'room-1' },
+        emit: vi.fn(),
+        to: vi.fn().mockReturnValue({ emit: vi.fn() }),
+      };
+
+      (gateway as any).rooms.set('room-1', {
+        width: 2000,
+        height: 2000,
+        obstacles: [
+          { id: 'wall-1', x: 100, y: 100, width: 200, height: 20 },
+        ],
+        players: new Map([
+          [
+            'alice',
+            {
+              userId: 'alice',
+              displayName: 'Alice',
+              x: 1000,
+              y: 860,
+              direction: 'down',
+              lastMoveTime: Date.now() - 500,
+              nearbyPeers: new Set(),
+            },
+          ],
+        ]),
+      });
+
+      // Move into open hallway at x: 1000, y: 880
+      const result = await gateway.handleMove(mockClient, { x: 1000, y: 880, direction: 'down' });
+
+      expect(result.success).toBe(true);
+      expect(result.x).toBe(1000);
+      expect(result.y).toBe(880);
+    });
+
+    it('should emit proximity:distance for volume attenuation when moving within proximity range', () => {
+      const mockClientAlice: any = {
+        data: { user: { id: 'alice', displayName: 'Alice' }, roomId: 'room-1' },
+        emit: vi.fn(),
+      };
+      const mockClientBob: any = {
+        data: { user: { id: 'bob', displayName: 'Bob' }, roomId: 'room-1' },
+        emit: vi.fn(),
+      };
+
+      (gateway as any).userSockets.set('alice', 'socket-alice');
+      (gateway as any).userSockets.set('bob', 'socket-bob');
+
+      const playerAlice: any = {
+        userId: 'alice',
+        displayName: 'Alice',
+        x: 500,
+        y: 500,
+        currentZoneId: null,
+        nearbyPeers: new Set(['bob']), // Already in proximity!
+      };
+      const playerBob: any = {
+        userId: 'bob',
+        displayName: 'Bob',
+        x: 550,
+        y: 500,
+        currentZoneId: null,
+        nearbyPeers: new Set(['alice']),
+      };
+
+      (gateway as any).rooms.set('room-1', {
+        width: 2000,
+        height: 2000,
+        players: new Map([
+          ['alice', playerAlice],
+          ['bob', playerBob],
+        ]),
+      });
+
+      // Update proximity: distance is 50px
+      (gateway as any).updateProximity('room-1', playerAlice, mockClientAlice);
+
+      expect(mockClientAlice.emit).toHaveBeenCalledWith('proximity:distance', {
+        peerId: 'bob',
+        distance: 50,
+      });
     });
   });
 });

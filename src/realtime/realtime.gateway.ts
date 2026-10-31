@@ -25,6 +25,14 @@ export interface RoomZone {
   height: number;
 }
 
+export interface RoomObstacle {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface PlayerState {
   userId: string;
   displayName: string;
@@ -44,6 +52,7 @@ export interface RoomState {
   spawnX?: number;
   spawnY?: number;
   zones?: RoomZone[];
+  obstacles?: RoomObstacle[];
   players: Map<string, PlayerState>;
 }
 
@@ -144,6 +153,7 @@ export class RealtimeGateway
         if (data.spawnX !== undefined) room.spawnX = data.spawnX;
         if (data.spawnY !== undefined) room.spawnY = data.spawnY;
         if (data.zones !== undefined) room.zones = data.zones;
+        if (data.obstacles !== undefined) room.obstacles = data.obstacles;
       }
       this.server.to(data.roomId).emit('room:updated', data);
     });
@@ -175,6 +185,9 @@ export class RealtimeGateway
               const peerSocketId = this.userSockets.get(peerId);
               if (peerSocketId) {
                 this.server.to(peerSocketId).emit('proximity:leave', {
+                  peerId: memberUserId,
+                });
+                this.server.to(peerSocketId).emit('webrtc:peer-disconnected', {
                   peerId: memberUserId,
                 });
               }
@@ -311,6 +324,9 @@ export class RealtimeGateway
                 this.server.to(peerSocketId).emit('proximity:leave', {
                   peerId: user.id,
                 });
+                this.server.to(peerSocketId).emit('webrtc:peer-disconnected', {
+                  peerId: user.id,
+                });
               }
             }
           }
@@ -359,9 +375,10 @@ export class RealtimeGateway
       this.rooms.set(data.roomId, {
         width: roomDetails.width,
         height: roomDetails.height,
-        spawnX: (roomDetails as any).spawnX ?? 500,
-        spawnY: (roomDetails as any).spawnY ?? 500,
-        zones: (roomDetails as any).zones || [],
+        spawnX: roomDetails.spawnX ?? 1000,
+        spawnY: roomDetails.spawnY ?? 860,
+        zones: (roomDetails.zones as unknown as RoomZone[]) || [],
+        obstacles: (roomDetails.obstacles as unknown as RoomObstacle[]) || [],
         players: new Map(),
       });
     }
@@ -369,11 +386,33 @@ export class RealtimeGateway
     const room = this.rooms.get(data.roomId)!;
 
     if (client.data.roomId && client.data.roomId !== data.roomId) {
-      client.leave(client.data.roomId);
-      const prevRoom = this.rooms.get(client.data.roomId);
+      const prevRoomId = client.data.roomId;
+      client.leave(prevRoomId);
+      const prevRoom = this.rooms.get(prevRoomId);
       if (prevRoom) {
+        const leavingPlayer = prevRoom.players.get(user.id);
+        if (leavingPlayer) {
+          for (const peerId of leavingPlayer.nearbyPeers) {
+            const peer = prevRoom.players.get(peerId);
+            if (peer) {
+              peer.nearbyPeers.delete(user.id);
+              const peerSocketId = this.userSockets.get(peerId);
+              if (peerSocketId) {
+                this.server.to(peerSocketId).emit('proximity:leave', {
+                  peerId: user.id,
+                });
+                this.server.to(peerSocketId).emit('webrtc:peer-disconnected', {
+                  peerId: user.id,
+                });
+              }
+            }
+          }
+        }
         prevRoom.players.delete(user.id);
-        client.to(client.data.roomId).emit('player:left', { userId: user.id });
+        client.to(prevRoomId).emit('player:left', { userId: user.id });
+        if (prevRoom.players.size === 0) {
+          this.rooms.delete(prevRoomId);
+        }
       }
     }
 
@@ -383,8 +422,8 @@ export class RealtimeGateway
     const playerCount = room.players.size;
     // Stagger horizontal spawn positions: +0, +44, -44, +88, -88... so players do not overlap
     const spread = (playerCount % 2 === 0 ? 1 : -1) * Math.ceil(playerCount / 2) * 44;
-    const baseSpawnX = room.spawnX ?? Math.floor(room.width / 2);
-    const baseSpawnY = room.spawnY ?? 480;
+    const baseSpawnX = room.spawnX ?? 1000;
+    const baseSpawnY = room.spawnY ?? 860;
     const spawnX = Math.max(20, Math.min(room.width - 20, baseSpawnX + spread));
     const spawnY = baseSpawnY;
 
@@ -430,9 +469,10 @@ export class RealtimeGateway
       roomId: data.roomId,
       width: room.width,
       height: room.height,
-      spawnX: room.spawnX ?? 500,
-      spawnY: room.spawnY ?? 500,
+      spawnX: room.spawnX ?? 1000,
+      spawnY: room.spawnY ?? 860,
       zones: room.zones || [],
+      obstacles: room.obstacles || [],
       players: serializedPlayers,
     });
 
@@ -504,6 +544,15 @@ export class RealtimeGateway
       };
     }
 
+    // Check authoritative collision against room obstacles (walls, furniture, counters)
+    if (this.isCollidingWithObstacles(room, data.x, data.y)) {
+      return {
+        success: false,
+        error: 'Path blocked by obstacle',
+        correctedPosition: { x: currentPlayer.x, y: currentPlayer.y },
+      };
+    }
+
     const now = Date.now();
     const timeDeltaSeconds = Math.max((now - currentPlayer.lastMoveTime) / 1000, 0.05);
 
@@ -538,10 +587,38 @@ export class RealtimeGateway
           zoneId: newZone.id,
           zoneName: newZone.name,
         });
+
+        // Notify coworkers inside the entered zone
+        for (const [peerId, peer] of room.players) {
+          if (peerId !== user.id && peer.currentZoneId === newZone.id) {
+            const peerSocketId = this.userSockets.get(peerId);
+            if (peerSocketId) {
+              this.server.to(peerSocketId).emit('zone:peer-entered', {
+                userId: user.id,
+                displayName: currentPlayer.displayName,
+                zoneId: newZone.id,
+              });
+            }
+          }
+        }
       } else if (prevZoneId) {
         client.emit('zone:left', {
           zoneId: prevZoneId,
         });
+
+        // Notify coworkers inside the vacated zone
+        for (const [peerId, peer] of room.players) {
+          if (peerId !== user.id && peer.currentZoneId === prevZoneId) {
+            const peerSocketId = this.userSockets.get(peerId);
+            if (peerSocketId) {
+              this.server.to(peerSocketId).emit('zone:peer-left', {
+                userId: user.id,
+                displayName: currentPlayer.displayName,
+                zoneId: prevZoneId,
+              });
+            }
+          }
+        }
       }
     }
 
@@ -916,6 +993,43 @@ export class RealtimeGateway
     return null;
   }
 
+  /**
+   * Authoritative collision detection:
+   * Checks if a 20x20 player bounding box at (x, y) collides with any room obstacle
+   */
+  private isCollidingWithObstacles(room: RoomState, x: number, y: number): boolean {
+    if (!room.obstacles || !Array.isArray(room.obstacles) || room.obstacles.length === 0) {
+      return false;
+    }
+
+    // Player AABB (20x20 box centered on x, y)
+    const halfSize = 10;
+    const playerLeft = x - halfSize;
+    const playerRight = x + halfSize;
+    const playerTop = y - halfSize;
+    const playerBottom = y + halfSize;
+
+    for (const obs of room.obstacles) {
+      const obsLeft = obs.x;
+      const obsRight = obs.x + obs.width;
+      const obsTop = obs.y;
+      const obsBottom = obs.y + obs.height;
+
+      // Check AABB intersection
+      const intersects =
+        playerLeft < obsRight &&
+        playerRight > obsLeft &&
+        playerTop < obsBottom &&
+        playerBottom > obsTop;
+
+      if (intersects) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   private updateProximity(
     roomId: string,
     player: PlayerState,
@@ -928,6 +1042,12 @@ export class RealtimeGateway
       if (otherId === player.userId) continue;
 
       let isNearby = false;
+      const distance = Math.round(
+        Math.sqrt(
+          Math.pow(player.x - otherPlayer.x, 2) +
+            Math.pow(player.y - otherPlayer.y, 2),
+        ),
+      );
 
       // Case 1: Both players in the same private meeting zone
       if (
@@ -943,10 +1063,6 @@ export class RealtimeGateway
       }
       // Case 3: Both players in the general/commons area
       else {
-        const distance = Math.sqrt(
-          Math.pow(player.x - otherPlayer.x, 2) +
-            Math.pow(player.y - otherPlayer.y, 2),
-        );
         isNearby = distance <= this.PROXIMITY_RADIUS;
       }
 
@@ -961,6 +1077,7 @@ export class RealtimeGateway
           peerId: otherId,
           displayName: otherPlayer.displayName,
           zoneId: player.currentZoneId ?? null,
+          distance,
         });
 
         if (otherSocketId) {
@@ -968,6 +1085,20 @@ export class RealtimeGateway
             peerId: player.userId,
             displayName: player.displayName,
             zoneId: otherPlayer.currentZoneId ?? null,
+            distance,
+          });
+        }
+      } else if (isNearby && wasNearby) {
+        // Continuous distance update for smooth audio volume attenuation
+        client.emit('proximity:distance', {
+          peerId: otherId,
+          distance,
+        });
+
+        if (otherSocketId) {
+          this.server.to(otherSocketId).emit('proximity:distance', {
+            peerId: player.userId,
+            distance,
           });
         }
       } else if (!isNearby && wasNearby) {
@@ -977,9 +1108,15 @@ export class RealtimeGateway
         client.emit('proximity:leave', {
           peerId: otherId,
         });
+        client.emit('webrtc:peer-disconnected', {
+          peerId: otherId,
+        });
 
         if (otherSocketId) {
           this.server.to(otherSocketId).emit('proximity:leave', {
+            peerId: player.userId,
+          });
+          this.server.to(otherSocketId).emit('webrtc:peer-disconnected', {
             peerId: player.userId,
           });
         }
